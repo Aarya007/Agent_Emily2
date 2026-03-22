@@ -1,11 +1,24 @@
 import React, { Suspense, useEffect, useRef } from 'react'
 import { Canvas, useFrame } from '@react-three/fiber'
 import { useGLTF } from '@react-three/drei'
+import { getScrollProgressThroughSection, easeInOutCubic } from '../../utils/heroScrollProgress'
 
 // ── 3D waypoints ────────────────────────────────────────────────────────────
 const CENTER_POS = [0, -1, 0]
-const GUIDE_POS  = [2.5, -1, 0]
+/**
+ * Hero path: upper-left → lower-right, kept inside the camera frustum (avoid extreme X/Y).
+ * Tuned for camera pulled back + slightly wider FOV so start/end stay on-screen.
+ */
+const HERO_PARK_POS = [-3.35, -0.05, 0.1]
+/** End of hero + guide pose for sections after hero */
+const GUIDE_POS  = [2.35, -1.3, -0.5]
+/** Yaw aligned with diagonal (XZ); small offset if model forward axis differs */
+const HERO_PATH_YAW =
+  Math.atan2(GUIDE_POS[0] - HERO_PARK_POS[0], GUIDE_POS[2] - HERO_PARK_POS[2]) + 0.08
 const PARK_POS   = [0, -1, 0]   // returns to center to "park"
+
+/** Uniform scale vs prior art direction (1.5 = 50% larger on screen) */
+const ROBOT_SCALE_MUL = 1.5
 
 useGLTF.preload('/models/robot.glb')
 
@@ -35,18 +48,21 @@ function useSectionProgressRefs() {
 
   useEffect(() => {
     const handle = () => {
-      const viewportCenter = window.scrollY + window.innerHeight * 0.5
+      const scrollY = window.scrollY
+      const vh = window.innerHeight
 
       for (const cfg of SECTIONS) {
         const el = document.getElementById(cfg.id)
         if (!el) continue
 
-        const top    = el.offsetTop
+        const top = el.offsetTop
         const height = el.offsetHeight || 1
+        const bottom = top + height
 
-        if (viewportCenter >= top && viewportCenter <= top + height) {
-          sectionRef.current         = cfg.key
-          sectionProgressRef.current = Math.max(0, Math.min(1, (viewportCenter - top) / height))
+        // Section active when its vertical range intersects the viewport
+        if (scrollY + vh > top && scrollY < bottom) {
+          sectionRef.current = cfg.key
+          sectionProgressRef.current = getScrollProgressThroughSection(el)
           return
         }
       }
@@ -90,71 +106,88 @@ function RobotModel({ sectionRef, sectionProgressRef }) {
     const prog    = sectionProgressRef.current
 
     let targetOpacity = 0
-    let targetScale   = 0.8
+    let targetScale   = 0.8 * ROBOT_SCALE_MUL
     let targetPos     = [...CENTER_POS]
+    let targetRotX    = 0
     let targetRotY    = 0
+    let targetRotZ    = 0
 
-    // ── Hero: robot fully hidden ──────────────────────────────────────────
+    // ── Hero: parked left-upper → drive to right-bottom as user scrolls (p = 0..1) ──
     if (section === 'hero') {
-      targetOpacity = 0
-      targetScale   = 0.7
-      targetPos     = [...CENTER_POS]
-      targetRotY    = 0
+      const p = prog
+      const clock = state.clock.getElapsedTime()
+      // Scroll-only motion: still target when user stops scrolling (p fixed)
+      const te = easeInOutCubic(p)
+      const moveW = Math.sin(te * Math.PI)
 
-    // ── Meet Argo: fade in → hold at center → then drive right ──────────
-    } else if (section === 'meet-argo') {
-      // fast fade-in in the first 20% of the section
-      const fadeT = Math.min(1, prog / 0.2)
-      targetOpacity = lerp(0, 1, fadeT)
-
-      // hold at center for first 17% of section ("breathe"), then drive right
-      const holdEnd = 0.17
-      const driveT  = easeOutCubic(Math.max(0, (prog - holdEnd) / (1 - holdEnd)))
-      targetScale   = lerp(1.2, 0.9, driveT)
-      targetPos     = [
-        lerp(CENTER_POS[0], GUIDE_POS[0], driveT),
-        lerp(CENTER_POS[1], GUIDE_POS[1], driveT),
-        lerp(CENTER_POS[2], GUIDE_POS[2], driveT),
+      targetPos = [
+        lerp(HERO_PARK_POS[0], GUIDE_POS[0], te),
+        lerp(HERO_PARK_POS[1], GUIDE_POS[1], te),
+        lerp(HERO_PARK_POS[2], GUIDE_POS[2], te),
       ]
-      // lean slightly toward direction of travel before settling
-      targetRotY = (Math.PI / 6) * driveT
+      targetOpacity = lerp(0.45, 1, Math.min(1, te * 1.05))
+      targetScale = 0.82 * ROBOT_SCALE_MUL
+      targetRotY = lerp(HERO_PATH_YAW * 0.45, HERO_PATH_YAW, te)
+      // Driving feel: slight pitch into the move + tiny roll only while mid-path
+      targetRotX = -0.04 * moveW
+      targetRotZ = Math.sin(clock * 11) * 0.01 * moveW
 
-    // ── Industries: stay in guide mode, subtle idle ───────────────────────
-    } else if (section === 'industries') {
-      const wobble  = Math.sin(state.clock.getElapsedTime() * 1.8) * 0.12
+    // ── Core idea: minimal idle at guide (no long wobble) ────────────────────
+    } else if (section === 'meet-argo') {
+      const clock = state.clock.getElapsedTime()
+      const idleY = Math.sin(clock * 1.15) * 0.02
       targetOpacity = 1
-      targetScale   = 0.9
-      targetPos     = [GUIDE_POS[0], GUIDE_POS[1] + wobble * 0.15, GUIDE_POS[2] + wobble * 0.25]
-      targetRotY    = Math.PI / 6
+      targetScale = 0.9 * ROBOT_SCALE_MUL
+      targetPos = [GUIDE_POS[0], GUIDE_POS[1] + idleY, GUIDE_POS[2]]
+      targetRotY = HERO_PATH_YAW
+      targetRotX = Math.sin(clock * 1) * 0.01
+      targetRotZ = Math.sin(clock * 1.2) * 0.008
+
+    // ── Industries: minimal idle at guide ──────────────────────────────────
+    } else if (section === 'industries') {
+      const clock = state.clock.getElapsedTime()
+      const idleY = Math.sin(clock * 1.15) * 0.02
+      targetOpacity = 1
+      targetScale   = 0.9 * ROBOT_SCALE_MUL
+      targetPos     = [GUIDE_POS[0], GUIDE_POS[1] + idleY, GUIDE_POS[2]]
+      targetRotY    = HERO_PATH_YAW
+      targetRotX    = Math.sin(clock * 1) * 0.01
+      targetRotZ    = Math.sin(clock * 1.2) * 0.008
 
     // ── Real World: drive back to center and park ─────────────────────────
     } else if (section === 'real-world') {
       const returnT  = easeOutCubic(prog)
       targetOpacity  = 1
-      targetScale    = lerp(0.9, 1.2, returnT)
+      targetScale    = lerp(0.9 * ROBOT_SCALE_MUL, 1.2 * ROBOT_SCALE_MUL, returnT)
       targetPos      = [
         lerp(GUIDE_POS[0], PARK_POS[0], returnT),
         lerp(GUIDE_POS[1], PARK_POS[1], returnT),
         lerp(GUIDE_POS[2], PARK_POS[2], returnT),
       ]
-      targetRotY     = lerp(Math.PI / 6, 0, returnT)
+      targetRotY     = lerp(HERO_PATH_YAW, 0, returnT)
+      targetRotX     = 0
+      targetRotZ     = 0
 
     // ── Footer: dissolve quickly in the first 30% of scroll, then gone ────
     } else if (section === 'footer') {
       const dissolveT = Math.min(1, prog / 0.05)
       targetOpacity = lerp(1, 0, dissolveT)
-      targetScale   = 1.2
+      targetScale   = 1.2 * ROBOT_SCALE_MUL
       targetPos     = [...PARK_POS]
       targetRotY    = 0
+      targetRotX    = 0
+      targetRotZ    = 0
     }
 
     // ── Smooth position / scale / rotation ───────────────────────────────
-    const s = 3 * delta
+    const s = section === 'hero' ? Math.min(1, 4.8 * delta) : Math.min(1, 3 * delta)
 
     group.current.position.x   = lerp(group.current.position.x, targetPos[0], s)
     group.current.position.y   = lerp(group.current.position.y, targetPos[1], s)
     group.current.position.z   = lerp(group.current.position.z, targetPos[2], s)
+    group.current.rotation.x     = lerp(group.current.rotation.x || 0, targetRotX, s)
     group.current.rotation.y   = lerp(group.current.rotation.y || 0, targetRotY, s)
+    group.current.rotation.z   = lerp(group.current.rotation.z || 0, targetRotZ, s)
 
     const curScale = group.current.scale.x || targetScale
     const nxtScale = lerp(curScale, targetScale, s)
@@ -187,7 +220,7 @@ const RobotGuide = () => {
     <div className="fixed inset-0 z-0 pointer-events-none overflow-hidden">
       <Canvas
         style={{ width: '100vw', height: '100vh' }}
-        camera={{ position: [0, 1.2, 5], fov: 45 }}
+        camera={{ position: [0, 1.1, 6.25], fov: 50, near: 0.1, far: 100 }}
       >
         <ambientLight intensity={0.7} />
         <directionalLight position={[5, 5, 5]} intensity={2} />
