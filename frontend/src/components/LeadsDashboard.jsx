@@ -143,10 +143,36 @@ const LeadsDashboard = () => {
   // Load all leads at once - no pagination
   const [loadedCount, setLoadedCount] = useState(0)
   const [total, setTotal] = useState(0)
-  const pageSize = 500 // Load maximum allowed leads (backend limit)
+  const pageSize = 10000 // Load all leads at once (backend caps at 10000 for safety)
 
-  const fetchLeads = useCallback(async (showLoading = true) => {
+  const fetchLeads = useCallback(async (showLoading = true, forceRefresh = false) => {
+    if (!user) return
+
+    const CACHE_KEY = `leads_cache_${user.id}_${filterStatus}_${filterPlatform}_${filterDateRange}`
+    const CACHE_EXPIRATION_MS = 5 * 60 * 1000 // 5 minutes
+
     try {
+      // Try cache first if not forcing refresh
+      if (!forceRefresh) {
+        const cached = localStorage.getItem(CACHE_KEY)
+        if (cached) {
+          try {
+            const { leads: cachedLeads, total: cachedTotal, timestamp } = JSON.parse(cached)
+            if (Date.now() - timestamp < CACHE_EXPIRATION_MS) {
+              console.log('Using cached leads data')
+              setLeads(cachedLeads)
+              setTotal(cachedTotal)
+              setLoadedCount(cachedLeads.length)
+              leadsRef.current = cachedLeads
+              setLoading(false)
+              return
+            }
+          } catch (e) {
+            console.warn('Failed to parse leads cache', e)
+          }
+        }
+      }
+
       if (showLoading) setLoading(true)
 
       const params = {}
@@ -163,26 +189,20 @@ const LeadsDashboard = () => {
       // Handle both old format (array) and new format (object with leads array)
       let fetchedLeads = []
       let totalCount = 0
-      let hasMoreData = false
 
       if (Array.isArray(response.data)) {
-        // Old format - backward compatibility (just an array of leads)
         fetchedLeads = response.data
         totalCount = fetchedLeads.length
-        hasMoreData = false // Load all leads at once, no pagination
       } else if (response.data && response.data.leads) {
-        // New format with pagination metadata
         fetchedLeads = response.data.leads || []
         totalCount = response.data.total || fetchedLeads.length
-        hasMoreData = false // Load all leads at once, no pagination
       } else {
         fetchedLeads = []
         totalCount = 0
-        hasMoreData = false
       }
 
       // Check for new leads using refs to avoid dependency issues (only on first load)
-      if (loadedCount === 0) {
+      if (loadedCount === 0 || forceRefresh) {
         const previousLeads = leadsRef.current
         const previousFetchTime = lastFetchTimeRef.current
 
@@ -208,9 +228,7 @@ const LeadsDashboard = () => {
       // Update state and refs
       setLeads(fetchedLeads)
       setLoadedCount(fetchedLeads.length)
-
       setTotal(totalCount)
-      // Load all leads at once, no pagination needed
 
       console.log(`FetchLeads: fetched=${fetchedLeads.length}, total=${totalCount}`)
 
@@ -220,13 +238,24 @@ const LeadsDashboard = () => {
       setLastFetchTime(now)
       lastFetchTimeRef.current = now
 
+      // Save to cache
+      try {
+        localStorage.setItem(CACHE_KEY, JSON.stringify({
+          leads: fetchedLeads,
+          total: totalCount,
+          timestamp: Date.now()
+        }))
+      } catch (e) {
+        console.warn('Failed to save leads cache', e)
+      }
+
     } catch (error) {
       console.error('Error fetching leads:', error)
       showError('Error', 'Failed to fetch leads. Please try again.')
     } finally {
       if (showLoading) setLoading(false)
     }
-  }, [filterStatus, filterPlatform, pageSize, showError, showInfo])
+  }, [user, filterStatus, filterPlatform, filterDateRange, pageSize, showError, showInfo])
 
   // Clear leads data on logout
   useEffect(() => {
@@ -317,7 +346,7 @@ const LeadsDashboard = () => {
     if (!user) return
 
     const interval = setInterval(() => {
-      fetchLeads(false) // Don't show loading spinner for polling
+      fetchLeads(false, true) // Don't show loading spinner for polling, bypass cache
     }, 30000) // Poll every 30 seconds
 
     setPollingInterval(interval)
@@ -341,7 +370,7 @@ const LeadsDashboard = () => {
       await leadsAPI.deleteLead(lead.id)
       showSuccess('Lead Deleted', 'Lead has been deleted successfully')
       // Refresh leads list
-      await fetchLeads(false)
+      await fetchLeads(false, true)
       // Close modal if the deleted lead was selected
       if (selectedLead && selectedLead.id === lead.id) {
         setShowDetailModal(false)
@@ -400,7 +429,7 @@ const LeadsDashboard = () => {
           `${result.data.deleted_count} lead${result.data.deleted_count > 1 ? 's' : ''} deleted successfully${result.data.failed_count > 0 ? ` (${result.data.failed_count} failed)` : ''}`
         )
         // Refresh leads list
-        await fetchLeads(false)
+        await fetchLeads(false, true)
         // Clear selection
         setSelectedLeadIds(new Set())
         // Exit selection mode if all selected leads are deleted
@@ -474,7 +503,7 @@ const LeadsDashboard = () => {
         }
 
         // Refresh leads list
-        await fetchLeads(false)
+        await fetchLeads(false, true)
       } else {
         showError('Import Failed', result.message || 'Failed to import leads')
       }
@@ -491,11 +520,11 @@ const LeadsDashboard = () => {
     setShowDetailModal(false)
     setSelectedLead(null)
     // Refresh leads after modal closes in case status was updated
-    fetchLeads(false)
+    fetchLeads(false, true)
   }
 
   const handleRefresh = () => {
-    fetchLeads()
+    fetchLeads(true, true)
     showSuccess('Refreshed', 'Leads list updated')
   }
 
@@ -659,13 +688,11 @@ const LeadsDashboard = () => {
         fetchingFreshData={false}
       />
 
-      <div className={`md:ml-48 xl:ml-64 flex flex-col min-h-screen ${
-        isDarkMode ? 'md:bg-gray-800' : 'md:bg-gray-50'
-      }`}>
-        {/* Header */}
-        <div className={`shadow-sm border-b sticky top-0 z-20 ${
-          isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white'
+      <div className={`md:ml-48 xl:ml-64 flex flex-col min-h-screen ${isDarkMode ? 'md:bg-gray-800' : 'md:bg-gray-50'
         }`}>
+        {/* Header */}
+        <div className={`shadow-sm border-b sticky top-0 z-20 ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white'
+          }`}>
           <div className="px-4 lg:px-6 py-3 lg:py-4">
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 md:gap-4">
               {/* Date Range Filter */}
@@ -684,8 +711,8 @@ const LeadsDashboard = () => {
                         ? 'bg-white text-gray-900 shadow-md'
                         : 'bg-gradient-to-r from-green-500 to-emerald-600 text-white shadow-md'
                       : isDarkMode
-                      ? 'bg-gray-700 text-gray-200 hover:bg-gray-600 border border-gray-600'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200'
+                        ? 'bg-gray-700 text-gray-200 hover:bg-gray-600 border border-gray-600'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200'
                       }`}
                   >
                     {filter.label}
@@ -702,11 +729,10 @@ const LeadsDashboard = () => {
                       type="date"
                       value={customStartDate}
                       onChange={(e) => setCustomStartDate(e.target.value)}
-                      className={`px-3 py-1.5 text-sm border rounded-md focus:outline-none focus:ring-2 transition-colors ${
-                        isDarkMode
-                          ? 'bg-gray-700 border-gray-600 text-gray-200 focus:ring-green-500 focus:border-green-500'
-                          : 'bg-white border-gray-300 text-gray-900 focus:ring-green-500 focus:border-green-500'
-                      }`}
+                      className={`px-3 py-1.5 text-sm border rounded-md focus:outline-none focus:ring-2 transition-colors ${isDarkMode
+                        ? 'bg-gray-700 border-gray-600 text-gray-200 focus:ring-green-500 focus:border-green-500'
+                        : 'bg-white border-gray-300 text-gray-900 focus:ring-green-500 focus:border-green-500'
+                        }`}
                       placeholder="Start date"
                     />
                   </div>
@@ -716,11 +742,10 @@ const LeadsDashboard = () => {
                       type="date"
                       value={customEndDate}
                       onChange={(e) => setCustomEndDate(e.target.value)}
-                      className={`px-3 py-1.5 text-sm border rounded-md focus:outline-none focus:ring-2 transition-colors ${
-                        isDarkMode
-                          ? 'bg-gray-700 border-gray-600 text-gray-200 focus:ring-green-500 focus:border-green-500'
-                          : 'bg-white border-gray-300 text-gray-900 focus:ring-green-500 focus:border-green-500'
-                      }`}
+                      className={`px-3 py-1.5 text-sm border rounded-md focus:outline-none focus:ring-2 transition-colors ${isDarkMode
+                        ? 'bg-gray-700 border-gray-600 text-gray-200 focus:ring-green-500 focus:border-green-500'
+                        : 'bg-white border-gray-300 text-gray-900 focus:ring-green-500 focus:border-green-500'
+                        }`}
                       placeholder="End date"
                     />
                     {(customStartDate || customEndDate) && (
@@ -729,11 +754,10 @@ const LeadsDashboard = () => {
                           setCustomStartDate('')
                           setCustomEndDate('')
                         }}
-                        className={`p-1 rounded transition-colors ${
-                          isDarkMode
-                            ? 'text-gray-400 hover:text-gray-200 hover:bg-gray-600'
-                            : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
-                        }`}
+                        className={`p-1 rounded transition-colors ${isDarkMode
+                          ? 'text-gray-400 hover:text-gray-200 hover:bg-gray-600'
+                          : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+                          }`}
                         title="Clear date filter"
                       >
                         <X className="w-3.5 h-3.5" />
@@ -751,18 +775,16 @@ const LeadsDashboard = () => {
                   placeholder="Search by name, email, or phone..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className={`w-full pl-10 pr-10 py-2 text-sm border rounded-lg focus:ring-2 ${
-                    isDarkMode
-                      ? 'bg-gray-700 border-gray-600 text-gray-200 focus:ring-green-500 focus:border-green-500 placeholder-gray-400'
-                      : 'border-gray-300 focus:ring-blue-500 focus:border-transparent'
-                  }`}
+                  className={`w-full pl-10 pr-10 py-2 text-sm border rounded-lg focus:ring-2 ${isDarkMode
+                    ? 'bg-gray-700 border-gray-600 text-gray-200 focus:ring-green-500 focus:border-green-500 placeholder-gray-400'
+                    : 'border-gray-300 focus:ring-blue-500 focus:border-transparent'
+                    }`}
                 />
                 <button
                   onClick={() => setShowFilterDropdown(!showFilterDropdown)}
-                  className={`absolute right-2 top-1/2 transform -translate-y-1/2 p-1 rounded transition-colors ${
-                    filterPlatform !== 'all'
-                      ? 'text-green-600'
-                      : isDarkMode
+                  className={`absolute right-2 top-1/2 transform -translate-y-1/2 p-1 rounded transition-colors ${filterPlatform !== 'all'
+                    ? 'text-green-600'
+                    : isDarkMode
                       ? 'text-gray-500 hover:text-gray-300'
                       : 'text-gray-400 hover:text-gray-600'
                     }`}
@@ -770,11 +792,10 @@ const LeadsDashboard = () => {
                   <Filter className="w-4 h-4" />
                 </button>
                 {showFilterDropdown && (
-                  <div className={`absolute right-0 mt-2 w-48 rounded-lg shadow-lg z-50 max-h-96 overflow-y-auto ${
-                    isDarkMode
-                      ? 'bg-gray-800 border border-gray-700 shadow-gray-900/50'
-                      : 'bg-white border border-gray-200'
-                  }`}>
+                  <div className={`absolute right-0 mt-2 w-48 rounded-lg shadow-lg z-50 max-h-96 overflow-y-auto ${isDarkMode
+                    ? 'bg-gray-800 border border-gray-700 shadow-gray-900/50'
+                    : 'bg-white border border-gray-200'
+                    }`}>
                     <button
                       onClick={() => {
                         setFilterPlatform('all')
@@ -785,8 +806,8 @@ const LeadsDashboard = () => {
                           ? 'bg-white text-gray-900 font-medium'
                           : 'bg-green-100 text-green-700 font-medium'
                         : isDarkMode
-                        ? 'text-gray-200 hover:bg-gray-700'
-                        : 'text-gray-700 hover:bg-gray-50'
+                          ? 'text-gray-200 hover:bg-gray-700'
+                          : 'text-gray-700 hover:bg-gray-50'
                         }`}
                     >
                       All Platforms
@@ -796,12 +817,11 @@ const LeadsDashboard = () => {
                         setFilterPlatform('facebook')
                         setShowFilterDropdown(false)
                       }}
-                      className={`w-full text-left px-4 py-2 text-sm ${
-                        filterPlatform === 'facebook'
-                          ? isDarkMode
-                            ? 'bg-white text-gray-900 font-medium'
-                            : 'bg-green-100 text-green-700 font-medium'
-                          : isDarkMode
+                      className={`w-full text-left px-4 py-2 text-sm ${filterPlatform === 'facebook'
+                        ? isDarkMode
+                          ? 'bg-white text-gray-900 font-medium'
+                          : 'bg-green-100 text-green-700 font-medium'
+                        : isDarkMode
                           ? 'text-gray-200 hover:bg-gray-700'
                           : 'text-gray-700 hover:bg-gray-50'
                         }`}
@@ -813,12 +833,11 @@ const LeadsDashboard = () => {
                         setFilterPlatform('instagram')
                         setShowFilterDropdown(false)
                       }}
-                      className={`w-full text-left px-4 py-2 text-sm ${
-                        filterPlatform === 'instagram'
-                          ? isDarkMode
-                            ? 'bg-white text-gray-900 font-medium'
-                            : 'bg-green-100 text-green-700 font-medium'
-                          : isDarkMode
+                      className={`w-full text-left px-4 py-2 text-sm ${filterPlatform === 'instagram'
+                        ? isDarkMode
+                          ? 'bg-white text-gray-900 font-medium'
+                          : 'bg-green-100 text-green-700 font-medium'
+                        : isDarkMode
                           ? 'text-gray-200 hover:bg-gray-700'
                           : 'text-gray-700 hover:bg-gray-50'
                         }`}
@@ -830,12 +849,11 @@ const LeadsDashboard = () => {
                         setFilterPlatform('walk_ins')
                         setShowFilterDropdown(false)
                       }}
-                      className={`w-full text-left px-4 py-2 text-sm ${
-                        filterPlatform === 'walk_ins'
-                          ? isDarkMode
-                            ? 'bg-white text-gray-900 font-medium'
-                            : 'bg-green-100 text-green-700 font-medium'
-                          : isDarkMode
+                      className={`w-full text-left px-4 py-2 text-sm ${filterPlatform === 'walk_ins'
+                        ? isDarkMode
+                          ? 'bg-white text-gray-900 font-medium'
+                          : 'bg-green-100 text-green-700 font-medium'
+                        : isDarkMode
                           ? 'text-gray-200 hover:bg-gray-700'
                           : 'text-gray-700 hover:bg-gray-50'
                         }`}
@@ -847,12 +865,11 @@ const LeadsDashboard = () => {
                         setFilterPlatform('referral')
                         setShowFilterDropdown(false)
                       }}
-                      className={`w-full text-left px-4 py-2 text-sm ${
-                        filterPlatform === 'referral'
-                          ? isDarkMode
-                            ? 'bg-white text-gray-900 font-medium'
-                            : 'bg-green-100 text-green-700 font-medium'
-                          : isDarkMode
+                      className={`w-full text-left px-4 py-2 text-sm ${filterPlatform === 'referral'
+                        ? isDarkMode
+                          ? 'bg-white text-gray-900 font-medium'
+                          : 'bg-green-100 text-green-700 font-medium'
+                        : isDarkMode
                           ? 'text-gray-200 hover:bg-gray-700'
                           : 'text-gray-700 hover:bg-gray-50'
                         }`}
@@ -864,12 +881,11 @@ const LeadsDashboard = () => {
                         setFilterPlatform('email')
                         setShowFilterDropdown(false)
                       }}
-                      className={`w-full text-left px-4 py-2 text-sm ${
-                        filterPlatform === 'email'
-                          ? isDarkMode
-                            ? 'bg-white text-gray-900 font-medium'
-                            : 'bg-green-100 text-green-700 font-medium'
-                          : isDarkMode
+                      className={`w-full text-left px-4 py-2 text-sm ${filterPlatform === 'email'
+                        ? isDarkMode
+                          ? 'bg-white text-gray-900 font-medium'
+                          : 'bg-green-100 text-green-700 font-medium'
+                        : isDarkMode
                           ? 'text-gray-200 hover:bg-gray-700'
                           : 'text-gray-700 hover:bg-gray-50'
                         }`}
@@ -881,12 +897,11 @@ const LeadsDashboard = () => {
                         setFilterPlatform('website')
                         setShowFilterDropdown(false)
                       }}
-                      className={`w-full text-left px-4 py-2 text-sm ${
-                        filterPlatform === 'website'
-                          ? isDarkMode
-                            ? 'bg-white text-gray-900 font-medium'
-                            : 'bg-green-100 text-green-700 font-medium'
-                          : isDarkMode
+                      className={`w-full text-left px-4 py-2 text-sm ${filterPlatform === 'website'
+                        ? isDarkMode
+                          ? 'bg-white text-gray-900 font-medium'
+                          : 'bg-green-100 text-green-700 font-medium'
+                        : isDarkMode
                           ? 'text-gray-200 hover:bg-gray-700'
                           : 'text-gray-700 hover:bg-gray-50'
                         }`}
@@ -898,12 +913,11 @@ const LeadsDashboard = () => {
                         setFilterPlatform('phone_call')
                         setShowFilterDropdown(false)
                       }}
-                      className={`w-full text-left px-4 py-2 text-sm last:rounded-b-lg ${
-                        filterPlatform === 'phone_call'
-                          ? isDarkMode
-                            ? 'bg-white text-gray-900 font-medium'
-                            : 'bg-green-100 text-green-700 font-medium'
-                          : isDarkMode
+                      className={`w-full text-left px-4 py-2 text-sm last:rounded-b-lg ${filterPlatform === 'phone_call'
+                        ? isDarkMode
+                          ? 'bg-white text-gray-900 font-medium'
+                          : 'bg-green-100 text-green-700 font-medium'
+                        : isDarkMode
                           ? 'text-gray-200 hover:bg-gray-700'
                           : 'text-gray-700 hover:bg-gray-50'
                         }`}
@@ -917,16 +931,14 @@ const LeadsDashboard = () => {
               {/* Overdue Filter Indicator */}
               {showOverdueFollowUpsOnly && (
                 <div className="flex items-center space-x-2 flex-shrink-0">
-                  <div className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-sm ${
-                    isDarkMode ? 'bg-yellow-900/30 text-yellow-300' : 'bg-yellow-100 text-yellow-800'
-                  }`}>
+                  <div className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-sm ${isDarkMode ? 'bg-yellow-900/30 text-yellow-300' : 'bg-yellow-100 text-yellow-800'
+                    }`}>
                     <CalendarDays className="w-4 h-4" />
                     <span>Showing overdue follow-ups only</span>
                     <button
                       onClick={() => setShowOverdueFollowUpsOnly(false)}
-                      className={`ml-2 p-0.5 rounded hover:bg-black/10 ${
-                        isDarkMode ? 'hover:bg-white/10' : ''
-                      }`}
+                      className={`ml-2 p-0.5 rounded hover:bg-black/10 ${isDarkMode ? 'hover:bg-white/10' : ''
+                        }`}
                       title="Clear filter"
                     >
                       <X className="w-3 h-3" />
@@ -940,9 +952,8 @@ const LeadsDashboard = () => {
                 {selectionMode && (
                   <>
                     {/* Selection Count */}
-                    <div className={`flex items-center space-x-2 px-3 py-2 rounded-lg ${
-                      isDarkMode ? 'bg-blue-900/50 text-blue-300' : 'bg-blue-100 text-blue-800'
-                    }`}>
+                    <div className={`flex items-center space-x-2 px-3 py-2 rounded-lg ${isDarkMode ? 'bg-blue-900/50 text-blue-300' : 'bg-blue-100 text-blue-800'
+                      }`}>
                       <CheckCircle className="w-4 h-4" />
                       <span className="text-sm font-medium">
                         {selectedLeadIds.size} selected
@@ -952,11 +963,10 @@ const LeadsDashboard = () => {
                     {/* Select All/Deselect All */}
                     <button
                       onClick={handleSelectAll}
-                      className={`flex items-center space-x-2 px-3 py-2 rounded-lg transition-all duration-200 ${
-                        isDarkMode
-                          ? 'bg-gray-700 text-gray-200 hover:bg-gray-600 border border-gray-600'
-                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-300'
-                      }`}
+                      className={`flex items-center space-x-2 px-3 py-2 rounded-lg transition-all duration-200 ${isDarkMode
+                        ? 'bg-gray-700 text-gray-200 hover:bg-gray-600 border border-gray-600'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-300'
+                        }`}
                     >
                       <CheckCircle className="w-4 h-4" />
                       <span className="text-sm font-medium">
@@ -968,11 +978,10 @@ const LeadsDashboard = () => {
                     {selectedLeadIds.size > 0 && (
                       <button
                         onClick={() => setShowBulkDeleteConfirm(true)}
-                        className={`flex items-center space-x-2 px-4 py-2 rounded-lg transition-all duration-200 font-medium ${
-                          deletingBulk
-                            ? 'opacity-50 cursor-not-allowed bg-gray-400 text-white'
-                            : 'bg-red-500 hover:bg-red-600 text-white shadow-lg hover:shadow-xl'
-                        }`}
+                        className={`flex items-center space-x-2 px-4 py-2 rounded-lg transition-all duration-200 font-medium ${deletingBulk
+                          ? 'opacity-50 cursor-not-allowed bg-gray-400 text-white'
+                          : 'bg-red-500 hover:bg-red-600 text-white shadow-lg hover:shadow-xl'
+                          }`}
                       >
                         {deletingBulk ? (
                           <Loader2 className="w-4 h-4 animate-spin" />
@@ -986,11 +995,10 @@ const LeadsDashboard = () => {
                     {/* Cancel Selection */}
                     <button
                       onClick={handleToggleSelectionMode}
-                      className={`flex items-center space-x-2 px-3 py-2 rounded-lg transition-all duration-200 ${
-                        isDarkMode
-                          ? 'bg-gray-600 text-gray-200 hover:bg-gray-500 border border-gray-600'
-                          : 'bg-gray-500 text-white hover:bg-gray-600 border border-gray-400'
-                      }`}
+                      className={`flex items-center space-x-2 px-3 py-2 rounded-lg transition-all duration-200 ${isDarkMode
+                        ? 'bg-gray-600 text-gray-200 hover:bg-gray-500 border border-gray-600'
+                        : 'bg-gray-500 text-white hover:bg-gray-600 border border-gray-400'
+                        }`}
                     >
                       <X className="w-4 h-4" />
                       <span className="text-sm font-medium">Cancel</span>
@@ -1002,11 +1010,10 @@ const LeadsDashboard = () => {
                     {/* Bulk Selection Toggle */}
                     <button
                       onClick={handleToggleSelectionMode}
-                      className={`flex items-center space-x-2 px-3 py-2 rounded-lg transition-all duration-200 shadow-md hover:shadow-lg border ${
-                        isDarkMode
-                          ? 'bg-blue-600 text-white hover:bg-blue-700 border-blue-500'
-                          : 'bg-blue-500 text-white hover:bg-blue-600 border-blue-400'
-                      }`}
+                      className={`flex items-center space-x-2 px-3 py-2 rounded-lg transition-all duration-200 shadow-md hover:shadow-lg border ${isDarkMode
+                        ? 'bg-blue-600 text-white hover:bg-blue-700 border-blue-500'
+                        : 'bg-blue-500 text-white hover:bg-blue-600 border-blue-400'
+                        }`}
                       title="Select multiple leads for bulk actions"
                     >
                       <CheckCircle className="w-4 h-4" />
@@ -1015,11 +1022,10 @@ const LeadsDashboard = () => {
 
                     <button
                       onClick={() => setShowAddModal(true)}
-                      className={`p-2 rounded-lg transition-all duration-200 shadow-md hover:shadow-lg border ${
-                        isDarkMode
-                          ? 'bg-gray-700 text-gray-200 hover:bg-gray-600 border-gray-600'
-                          : 'bg-white text-black hover:bg-gray-100 border-gray-200'
-                      }`}
+                      className={`p-2 rounded-lg transition-all duration-200 shadow-md hover:shadow-lg border ${isDarkMode
+                        ? 'bg-gray-700 text-gray-200 hover:bg-gray-600 border-gray-600'
+                        : 'bg-white text-black hover:bg-gray-100 border-gray-200'
+                        }`}
                       title="Add Lead"
                     >
                       <UserPlus className="w-5 h-5" />
@@ -1027,11 +1033,10 @@ const LeadsDashboard = () => {
                     <button
                       onClick={handleRefresh}
                       disabled={loading}
-                      className={`p-2 rounded-lg transition-all duration-200 disabled:opacity-50 shadow-md hover:shadow-lg border ${
-                        isDarkMode
-                          ? 'bg-gray-700 text-gray-200 hover:bg-gray-600 border-gray-600'
-                          : 'bg-white text-black hover:bg-gray-100 border-gray-200'
-                      }`}
+                      className={`p-2 rounded-lg transition-all duration-200 disabled:opacity-50 shadow-md hover:shadow-lg border ${isDarkMode
+                        ? 'bg-gray-700 text-gray-200 hover:bg-gray-600 border-gray-600'
+                        : 'bg-white text-black hover:bg-gray-100 border-gray-200'
+                        }`}
                       title="Refresh"
                     >
                       <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
@@ -1052,17 +1057,14 @@ const LeadsDashboard = () => {
             </div>
           ) : filteredLeads.length === 0 ? (
             <div className="text-center py-12">
-              <Users className={`w-16 h-16 mx-auto mb-4 ${
-                isDarkMode ? 'text-gray-600' : 'text-gray-300'
-              }`} />
-              <h3 className={`text-lg font-semibold mb-2 ${
-                isDarkMode ? 'text-gray-100' : 'text-gray-900'
-              }`}>
+              <Users className={`w-16 h-16 mx-auto mb-4 ${isDarkMode ? 'text-gray-600' : 'text-gray-300'
+                }`} />
+              <h3 className={`text-lg font-semibold mb-2 ${isDarkMode ? 'text-gray-100' : 'text-gray-900'
+                }`}>
                 {searchQuery ? 'No leads found' : 'No leads yet'}
               </h3>
-              <p className={`${
-                isDarkMode ? 'text-gray-400' : 'text-gray-500'
-              }`}>
+              <p className={`${isDarkMode ? 'text-gray-400' : 'text-gray-500'
+                }`}>
                 {searchQuery
                   ? 'Try adjusting your search or filters'
                   : 'Leads from your Facebook and Instagram ads will appear here'}
@@ -1095,13 +1097,11 @@ const LeadsDashboard = () => {
                       <div className={`mb-2 border-b ${statusConfig.borderColor}`}></div>
 
                       {/* Column Cards */}
-                      <div className={`space-y-1.5 max-h-[calc(100vh-180px)] overflow-y-auto pb-4 custom-scrollbar ${
-                        isDarkMode ? 'dark-mode' : 'light-mode'
-                      }`}>
+                      <div className={`space-y-1.5 max-h-[calc(100vh-180px)] overflow-y-auto pb-4 custom-scrollbar ${isDarkMode ? 'dark-mode' : 'light-mode'
+                        }`}>
                         {columnLeads.length === 0 ? (
-                          <div className={`text-center py-8 text-sm ${
-                            isDarkMode ? 'text-gray-400' : 'text-gray-500'
-                          }`}>
+                          <div className={`text-center py-8 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'
+                            }`}>
                             No {statusFilter.label.toLowerCase()} leads
                           </div>
                         ) : (
@@ -1133,9 +1133,8 @@ const LeadsDashboard = () => {
 
       {/* End of list indicator */}
       {loadedCount > 0 && (
-        <div className={`text-center py-6 text-sm ${
-          isDarkMode ? 'text-gray-400' : 'text-gray-600'
-        }`}>
+        <div className={`text-center py-6 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
+          }`}>
           All leads loaded - {loadedCount} of {total} leads
         </div>
       )}
@@ -1181,9 +1180,8 @@ const LeadsDashboard = () => {
             ></div>
 
             {/* Modal panel */}
-            <div className={`inline-block w-full max-w-lg rounded-lg text-left overflow-hidden shadow-xl transform transition-all ${
-              isDarkMode ? 'bg-gray-800 border border-gray-700' : 'bg-white'
-            }`}>
+            <div className={`inline-block w-full max-w-lg rounded-lg text-left overflow-hidden shadow-xl transform transition-all ${isDarkMode ? 'bg-gray-800 border border-gray-700' : 'bg-white'
+              }`}>
               <div className="px-6 py-4">
                 {/* Header */}
                 <div className="flex items-center space-x-3 mb-4">
@@ -1193,36 +1191,31 @@ const LeadsDashboard = () => {
                     </div>
                   </div>
                   <div>
-                    <h3 className={`text-lg font-semibold ${
-                      isDarkMode ? 'text-white' : 'text-gray-900'
-                    }`}>
+                    <h3 className={`text-lg font-semibold ${isDarkMode ? 'text-white' : 'text-gray-900'
+                      }`}>
                       Delete Selected Leads
                     </h3>
-                    <p className={`text-sm ${
-                      isDarkMode ? 'text-gray-400' : 'text-gray-600'
-                    }`}>
+                    <p className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
+                      }`}>
                       This action cannot be undone
                     </p>
                   </div>
                 </div>
 
                 {/* Content */}
-                <div className={`mb-6 p-4 rounded-lg ${
-                  isDarkMode ? 'bg-red-900/20 border border-red-800' : 'bg-red-50 border border-red-200'
-                }`}>
+                <div className={`mb-6 p-4 rounded-lg ${isDarkMode ? 'bg-red-900/20 border border-red-800' : 'bg-red-50 border border-red-200'
+                  }`}>
                   <div className="flex items-start space-x-3">
                     <div className="flex-shrink-0">
                       <XCircle className="w-5 h-5 text-red-500 mt-0.5" />
                     </div>
                     <div>
-                      <p className={`text-sm font-medium ${
-                        isDarkMode ? 'text-red-300' : 'text-red-800'
-                      }`}>
+                      <p className={`text-sm font-medium ${isDarkMode ? 'text-red-300' : 'text-red-800'
+                        }`}>
                         You are about to delete {selectedLeadIds.size} lead{selectedLeadIds.size > 1 ? 's' : ''}
                       </p>
-                      <div className={`mt-2 text-sm ${
-                        isDarkMode ? 'text-gray-300' : 'text-gray-700'
-                      }`}>
+                      <div className={`mt-2 text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-700'
+                        }`}>
                         <p>This will permanently remove:</p>
                         <ul className="mt-1 ml-4 list-disc list-inside space-y-1">
                           <li>{selectedLeadIds.size} lead record{selectedLeadIds.size > 1 ? 's' : ''}</li>
@@ -1236,29 +1229,25 @@ const LeadsDashboard = () => {
                 </div>
 
                 {/* Warning */}
-                <div className={`flex items-start space-x-2 p-3 rounded-lg ${
-                  isDarkMode ? 'bg-yellow-900/20 border border-yellow-800' : 'bg-yellow-50 border border-yellow-200'
-                }`}>
-                  <AlertCircle className="w-5 h-5 text-yellow-500 flex-shrink-0 mt-0.5" />
-                  <p className={`text-sm ${
-                    isDarkMode ? 'text-yellow-300' : 'text-yellow-800'
+                <div className={`flex items-start space-x-2 p-3 rounded-lg ${isDarkMode ? 'bg-yellow-900/20 border border-yellow-800' : 'bg-yellow-50 border border-yellow-200'
                   }`}>
+                  <AlertCircle className="w-5 h-5 text-yellow-500 flex-shrink-0 mt-0.5" />
+                  <p className={`text-sm ${isDarkMode ? 'text-yellow-300' : 'text-yellow-800'
+                    }`}>
                     <strong>Warning:</strong> This action cannot be undone. Make sure you have selected the correct leads.
                   </p>
                 </div>
               </div>
 
               {/* Footer */}
-              <div className={`px-6 py-4 flex justify-end space-x-3 ${
-                isDarkMode ? 'bg-gray-700' : 'bg-gray-50'
-              }`}>
+              <div className={`px-6 py-4 flex justify-end space-x-3 ${isDarkMode ? 'bg-gray-700' : 'bg-gray-50'
+                }`}>
                 <button
                   onClick={() => setShowBulkDeleteConfirm(false)}
-                  className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
-                    isDarkMode
-                      ? 'text-gray-300 hover:text-white hover:bg-gray-600'
-                      : 'text-gray-700 hover:text-gray-900 hover:bg-gray-100'
-                  }`}
+                  className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${isDarkMode
+                    ? 'text-gray-300 hover:text-white hover:bg-gray-600'
+                    : 'text-gray-700 hover:text-gray-900 hover:bg-gray-100'
+                    }`}
                   disabled={deletingBulk}
                 >
                   Cancel
@@ -1266,11 +1255,10 @@ const LeadsDashboard = () => {
                 <button
                   onClick={handleBulkDelete}
                   disabled={deletingBulk}
-                  className={`px-4 py-2 text-sm font-medium rounded-lg transition-all duration-200 flex items-center space-x-2 ${
-                    deletingBulk
-                      ? 'opacity-50 cursor-not-allowed bg-gray-400 text-white'
-                      : 'bg-red-500 hover:bg-red-600 text-white shadow-lg hover:shadow-xl'
-                  }`}
+                  className={`px-4 py-2 text-sm font-medium rounded-lg transition-all duration-200 flex items-center space-x-2 ${deletingBulk
+                    ? 'opacity-50 cursor-not-allowed bg-gray-400 text-white'
+                    : 'bg-red-500 hover:bg-red-600 text-white shadow-lg hover:shadow-xl'
+                    }`}
                 >
                   {deletingBulk && <Loader2 className="w-4 h-4 animate-spin" />}
                   <span>{deletingBulk ? 'Deleting...' : 'Delete Leads'}</span>

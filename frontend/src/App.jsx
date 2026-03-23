@@ -31,6 +31,7 @@ import { onboardingAPI } from './services/onboarding'
 import NotificationWindow from './components/NotificationWindow'
 //  Components
 import LandingPage from './pages/LandingPage.jsx'
+import AboutPage from './pages/AboutPage.jsx'
 import PrivacyPolicy from './pages/PrivacyPolicy.jsx'
 import TermsAndConditions from './pages/TermsAndConditions.jsx'
 import CancellationAndRefunds from './pages/CancellationAndRefunds.jsx'
@@ -157,7 +158,7 @@ function AppContent() {
   const { notifications, removeNotification, markAsRead } = useNotifications()
 
   return (
-    <Router>
+      <Router>
       <Suspense fallback={<LoadingBar />}>
         <Routes>
           {/*  Routes */}
@@ -166,6 +167,7 @@ function AppContent() {
               <Navigate to="/dashboard" replace /> :
               <LandingPage />
           } />
+          <Route path="/about" element={<AboutPage />} />
           <Route path="/privacy" element={<PrivacyPolicy />} />
           <Route path="/terms" element={<TermsAndConditions />} />
           <Route path="/cancellation-refunds" element={<CancellationAndRefunds />} />
