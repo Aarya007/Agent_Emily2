@@ -1,10 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
+import Lenis from 'lenis';
+import 'lenis/dist/lenis.css';
 import SEO from '../components/SEO';
 import RobotGuide from '../components/robotics/RobotGuide';
 import Magnet from '../components/ui/Magnet';
 import gsap from 'gsap';
 import { ScrollTrigger } from 'gsap/dist/ScrollTrigger';
-import { getHeroProgress, getHeroDriveT } from '../utils/heroScrollProgress';
+import {
+  getHeroRobotProgress,
+  easeInOutCubic,
+} from '../utils/heroScrollProgress';
 
 gsap.registerPlugin(ScrollTrigger);
 
@@ -27,16 +32,14 @@ const CORE_PARAGRAPHS = [
 const CORE_IDEA_IMAGE =
   'https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?w=1400&q=80&auto=format&fit=crop';
 
-/**
- * Hero headline: fade in after robot passes path center (te > 0.5), same as RobotGuide.
- * Dwell / drift use raw scroll p so timing stays predictable.
- */
-const HERO_TITLE_TE = 0.52;
-const HERO_TITLE_DWELL_END = 0.68;
-const HERO_TITLE_UP_PX = 140;
-const HERO_SUB_TE = 0.6;
-const HERO_SUB_DWELL_END = 0.74;
-const HERO_SUB_UP_PX = 110;
+/** Robot phase: 1.5 viewports of scroll before page content scrolls */
+const ROBOT_PHASE_VH = 1.5;
+/** Wipe-in: each char reveals as robot passes (te-based threshold) */
+const WIPE_START = 0.12;
+const WIPE_RANGE = 0.55;
+
+const HERO_TITLE = 'Intelligence in Motion';
+const HERO_SUB = 'Robots that understand, adapt, and move naturally in human environments.';
 
 const INDUSTRY_CARDS = [
   {
@@ -57,62 +60,65 @@ const INDUSTRY_CARDS = [
 ];
 
 const RoboticsLandingPage = () => {
-  const heroTextRef = useRef(null);
-  const heroSubRef = useRef(null);
+  const titleCharRefs = useRef([]);
+  const subCharRefs = useRef([]);
   const coreVisualRef = useRef(null);
-  /** Once hero scroll completes (robot parked), reveal rest; stays on if user scrolls back */
+  const heroProgressRef = useRef(0);
+  const scrollRef = useRef(0);
+  const lenisRef = useRef(null);
   const [restRevealed, setRestRevealed] = useState(false);
+  const heroOverlayRef = useRef(null);
 
-  // Hero text: fade in after center pass → hold (dwell) → move up with remaining scroll.
+  // Lenis smooth scroll + hero tick (robot progress, curtain text)
   useEffect(() => {
-    let raf = 0;
+    const lenis = new Lenis({ autoRaf: false });
+    lenisRef.current = lenis;
+
+    lenis.on('scroll', ScrollTrigger.update);
+    const rafCb = (time) => lenis.raf(time * 1000);
+    gsap.ticker.add(rafCb);
+    gsap.ticker.lagSmoothing(0);
+
     const tick = () => {
-      const p = getHeroProgress();
-      const te = getHeroDriveT();
+      const scrollY = lenis.scroll;
+      scrollRef.current = scrollY;
+      const vh = window.innerHeight;
+      const robotP = getHeroRobotProgress(scrollY, vh, ROBOT_PHASE_VH);
+      const te = easeInOutCubic(robotP);
 
-      let titleOpacity = 0;
-      let titleY = 18;
-      if (te > HERO_TITLE_TE) {
-        titleOpacity = 1;
-        if (p <= HERO_TITLE_DWELL_END) {
-          titleY = 0;
-        } else {
-          const t = (p - HERO_TITLE_DWELL_END) / Math.max(0.001, 1 - HERO_TITLE_DWELL_END);
-          titleY = -HERO_TITLE_UP_PX * Math.min(1, t);
+      heroProgressRef.current = robotP;
+
+      const phaseHeight = ROBOT_PHASE_VH * vh;
+      if (scrollY >= phaseHeight) setRestRevealed(true);
+
+      if (heroOverlayRef.current) {
+        const overlayOpacity = scrollY >= phaseHeight ? 0 : 1;
+        gsap.set(heroOverlayRef.current, { opacity: overlayOpacity });
+      }
+
+      const nTitle = HERO_TITLE.length;
+      titleCharRefs.current.forEach((el, i) => {
+        if (el) {
+          const thresh = WIPE_START + (i / nTitle) * WIPE_RANGE;
+          gsap.set(el, { opacity: te > thresh ? 1 : 0 });
         }
-      }
-
-      let subOpacity = 0;
-      let subY = 16;
-      if (te > HERO_SUB_TE) {
-        subOpacity = 1;
-        if (p <= HERO_SUB_DWELL_END) {
-          subY = 0;
-        } else {
-          const t = (p - HERO_SUB_DWELL_END) / Math.max(0.001, 1 - HERO_SUB_DWELL_END);
-          subY = -HERO_SUB_UP_PX * Math.min(1, t);
+      });
+      const nSub = HERO_SUB.length;
+      subCharRefs.current.forEach((el, i) => {
+        if (el) {
+          const thresh = WIPE_START + (i / nSub) * WIPE_RANGE;
+          gsap.set(el, { opacity: te > thresh ? 1 : 0 });
         }
-      }
+      });
+    };
 
-      if (heroTextRef.current) {
-        gsap.set(heroTextRef.current, { opacity: titleOpacity, y: titleY });
-      }
-      if (heroSubRef.current) {
-        gsap.set(heroSubRef.current, { opacity: subOpacity, y: subY });
-      }
-      if (p >= 1) setRestRevealed(true);
-    };
-    const onScroll = () => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(tick);
-    };
-    window.addEventListener('scroll', onScroll, { passive: true });
-    window.addEventListener('resize', onScroll);
+    lenis.on('scroll', tick);
     tick();
+
     return () => {
-      window.removeEventListener('scroll', onScroll);
-      window.removeEventListener('resize', onScroll);
-      cancelAnimationFrame(raf);
+      gsap.ticker.remove(rafCb);
+      lenis.destroy();
+      lenisRef.current = null;
     };
   }, []);
 
@@ -178,7 +184,7 @@ const RoboticsLandingPage = () => {
         description="Robots that understand, adapt, and move naturally in human environments."
       />
 
-      <RobotGuide />
+      <RobotGuide heroProgressRef={heroProgressRef} scrollRef={scrollRef} />
 
       <main className="relative z-10 w-full pointer-events-none">
         <header
@@ -205,32 +211,52 @@ const RoboticsLandingPage = () => {
           </Magnet>
         </header>
 
-        <section
-          id="section-hero"
-          className="relative w-full min-h-[240vh] flex flex-col items-center justify-center px-6 pt-24 pb-32 pointer-events-auto"
-        >
-          <div className="relative z-10 flex flex-col items-center text-center max-w-4xl mx-auto gap-5">
-            <h1
-              ref={heroTextRef}
-              className="text-4xl sm:text-5xl md:text-7xl lg:text-8xl font-semibold tracking-tight leading-[1.08]"
-              style={{ color: C.text, opacity: 0 }}
-            >
-              Intelligence in Motion
-            </h1>
+        <section id="section-hero" className="relative w-full pointer-events-auto">
+          {/* Phase 1 spacer: creates scroll distance for robot animation (250vh = ~1.5 vp scroll + buffer) */}
+          <div style={{ height: '250vh' }} aria-hidden="true" />
+          {/* Fixed hero content during phase 1; fades out when robot exits */}
+          <div
+            ref={heroOverlayRef}
+            className="fixed inset-0 flex flex-col items-center justify-center px-6 pt-24 pb-32 pointer-events-none"
+            style={{ zIndex: 10 }}
+          >
+            <div className="flex flex-col items-center text-center max-w-4xl mx-auto gap-5">
+              <h1
+                className="text-4xl sm:text-5xl md:text-7xl lg:text-8xl font-semibold tracking-tight leading-[1.08]"
+                style={{ color: C.text }}
+              >
+                {HERO_TITLE.split('').map((char, i) => (
+                  <span
+                    key={i}
+                    ref={(el) => { titleCharRefs.current[i] = el; }}
+                    style={{ opacity: 0 }}
+                  >
+                    {char}
+                  </span>
+                ))}
+              </h1>
+              <p
+                className="text-base sm:text-lg md:text-xl max-w-2xl font-normal leading-relaxed"
+                style={{ color: C.secondary }}
+              >
+                {HERO_SUB.split('').map((char, i) => (
+                  <span
+                    key={i}
+                    ref={(el) => { subCharRefs.current[i] = el; }}
+                    style={{ opacity: 0 }}
+                  >
+                    {char}
+                  </span>
+                ))}
+              </p>
+            </div>
             <p
-              ref={heroSubRef}
-              className="text-base sm:text-lg md:text-xl max-w-2xl font-normal leading-relaxed"
-              style={{ color: C.secondary, opacity: 0 }}
+              className="absolute bottom-10 left-1/2 -translate-x-1/2 text-[11px] uppercase tracking-[0.35em]"
+              style={{ color: C.secondary }}
             >
-              Robots that understand, adapt, and move naturally in human environments.
+              Scroll
             </p>
           </div>
-          <p
-            className="absolute bottom-10 left-1/2 -translate-x-1/2 text-[11px] uppercase tracking-[0.35em] pointer-events-none"
-            style={{ color: C.secondary }}
-          >
-            Scroll
-          </p>
         </section>
 
         <div
